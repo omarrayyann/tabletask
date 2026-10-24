@@ -9,7 +9,7 @@ from .language.monitor import Monitor, Status
 from .language.schema import Task
 from .privileged import privileged_state
 from .robots import Robot
-from .sampling import build
+from .sampling import build, labels
 
 
 class Env:
@@ -27,6 +27,9 @@ class Env:
         image_size: Observation image size as (width, height).
         renderer: None to rasterise images, or "rtx" to path-trace them.
         reward: "success" or "subtasks", as `step` describes.
+        bounding_boxes: Camera names mapped to sequences of task object names to label.
+            Defaults to an empty dict. Only cameras included in the RGB observation
+            are labeled, using raster rendering.
     """
 
     def __init__(
@@ -47,6 +50,8 @@ class Env:
         self.image_size = (640, 368)  # 16:9, the shape of DROID's camera frames
         self.renderer = None
         self.reward = "success"
+        self.bounding_boxes = {}
+        self._object_labels = None
 
     @property
     def monitor_interval(self) -> float:
@@ -104,6 +109,7 @@ class Env:
         )
         try:
             self.task = self.runtime.task
+            self._object_labels = None
             self.episode = episode
             if self.renderer == "rtx":
                 self.runtime.use_rtx(*self.image_size)
@@ -191,6 +197,12 @@ class Env:
             (the robot's own observation), "priv_combined" (the privileged state, see
             `tabletask.privileged`; single-arm robots only) and, when cameras are rendered,
             "images".
+            With bounding_boxes enabled, also includes "bounding_boxes", mapping camera
+            names to object names to records with "label", "visible", and "yxyx".
+            yxyx is an int32 array of shape (4,) in image pixels, ordered as
+            (ymin, xmin, ymax, xmax), with exclusive maximum coordinates. Invisible
+            objects have visible=False and an all-zero box. Labels are omitted for
+            cameras not rendered, including intermediate steps of action chunks.
         """
         self._require_reset()
         cameras = self.cameras if cameras is None else cameras
@@ -222,6 +234,9 @@ class Env:
         if unknown:
             raise ValueError(f"unknown robot cameras: {sorted(unknown)}")
         if selected:
+            unknown_boxes = set(self.bounding_boxes) - set(available)
+            if unknown_boxes:
+                raise ValueError(f"unknown bounding-box cameras: {sorted(unknown_boxes)}")
             for dimension in (width, height):
                 if (
                     not isinstance(dimension, Integral)
@@ -230,6 +245,19 @@ class Env:
                 ):
                     raise ValueError("image width and height must be positive integers")
             observation["images"] = runtime.images(selected, width, height)
+            requested = {
+                camera: names
+                for camera, names in self.bounding_boxes.items()
+                if camera in selected and names
+            }
+            if requested:
+                if self._object_labels is None:
+                    self._object_labels = labels(self.task)
+                boxes = runtime.bounding_boxes(requested, width, height)
+                for objects in boxes.values():
+                    for name, box in objects.items():
+                        box["label"] = self._object_labels[name]
+                observation["bounding_boxes"] = boxes
         return observation
 
     def close(self):

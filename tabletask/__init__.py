@@ -39,6 +39,7 @@ def make(
     gpus=None,
     renderer=None,
     reward="success",
+    bounding_boxes=None,
     scene=None,
     bindings=None,
     monitor_interval=0.01,
@@ -54,6 +55,9 @@ def make(
         gpus: With `num_envs`, CUDA GPU indices the environments render on, in turn.
         renderer: None to rasterise images, or "rtx" to path-trace them.
         reward: "success" for 1.0 on success, or "subtasks" for 1.0 at each new milestone.
+        bounding_boxes: Optional camera-to-object-names mapping, such as
+            {"external": ["item1"]} for the pick-max target. Labels use visible pixels
+            in the returned RGB images. Defaults to None, disabling label rendering.
         scene: A scene XML file to use in place of the task's own.
         bindings: Assets for abstract objects, as {name: {"asset": path, "properties": {...}}}.
         monitor_interval: How often, in simulated seconds, task conditions are checked.
@@ -70,6 +74,7 @@ def make(
             gpus=gpus,
             renderer=renderer,
             reward=reward,
+            bounding_boxes=bounding_boxes,
             scene=scene,
             bindings=bindings,
             monitor_interval=monitor_interval,
@@ -80,6 +85,7 @@ def make(
     env = Env(load(source), scene, bindings, monitor_interval=monitor_interval, backend=backend)
     env.renderer = renderer
     env.reward = reward
+    env.bounding_boxes = bounding_boxes or {}
     if isinstance(robot, str):
         robot = _robot(robot)
     return env if robot is None else env.add(robot)

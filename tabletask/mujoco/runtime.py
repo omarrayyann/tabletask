@@ -68,6 +68,8 @@ class Runtime:
         self.start_state = None
         self._renderer = None
         self._image_size = None
+        self._box_renderer = None
+        self._box_image_size = None
         self._rtx = None  # set by use_rtx(); None means rasterise
         # How the start came out: set by sampling (rested, spawn_penetration) and by
         # inspection.try_out (sampling_error).
@@ -396,6 +398,61 @@ class Runtime:
                 out[name] = self._renderer.render().copy()
         return out
 
+    def bounding_boxes(self, cameras, width: int, height: int) -> dict:
+        """Visible object boxes in the corresponding rasterised RGB views.
+
+        Args:
+            cameras: Camera names mapped to sequences of task object names.
+            width: Image width in pixels, matching the RGB observation.
+            height: Image height in pixels, matching the RGB observation.
+
+        Returns:
+            Camera-to-object mappings with int32 yxyx arrays of shape (4,) and boolean
+            visible flags. Maximum coordinates are exclusive. Invisible boxes are zero.
+        """
+        if self._rtx is not None:
+            raise ValueError("bounding boxes require rasterised RGB images")
+        if self._box_renderer is None or self._box_image_size != (width, height):
+            if self._box_renderer is not None:
+                self._box_renderer.close()
+                self._box_renderer = None
+            # Disable antialiasing so object IDs cannot mix across geometry edges.
+            samples = self.model.vis.quality.offsamples
+            self.model.vis.quality.offsamples = 0
+            try:
+                self._box_renderer = make_renderer(self.model, width, height)
+            finally:
+                self.model.vis.quality.offsamples = samples
+            self._box_renderer.enable_segmentation_rendering()
+            self._box_image_size = (width, height)
+
+        out = {}
+        with scene_options(self) as options:
+            for camera, names in cameras.items():
+                self._box_renderer.update_scene(
+                    self.data, camera=self.camera(camera), scene_option=options
+                )
+                segmentation = self._box_renderer.render()
+                is_geom = segmentation[..., 1] == int(mujoco.mjtObj.mjOBJ_GEOM)
+                ids = np.where(is_geom, segmentation[..., 0] + 1, 0)
+                objects = {}
+                for name in names:
+                    key = ("box_membership", name)
+                    if key not in self._cache:
+                        lookup = np.zeros(self.model.ngeom + 1, dtype=bool)
+                        lookup[np.asarray(self._geoms_under(self.body(name)), dtype=int) + 1] = True
+                        self._cache[key] = lookup
+                    mask = self._cache[key][ids]
+                    rows = np.flatnonzero(mask.any(axis=1))
+                    columns = np.flatnonzero(mask.any(axis=0))
+                    visible = len(rows) > 0
+                    box = np.zeros(4, dtype=np.int32)
+                    if visible:
+                        box[:] = rows[0], columns[0], rows[-1] + 1, columns[-1] + 1
+                    objects[name] = {"yxyx": box, "visible": visible}
+                out[camera] = objects
+        return out
+
     def _raster_fallback(self, error):
         """Warn about an RTX failure and switch to rasterising."""
         warnings.warn(
@@ -404,17 +461,24 @@ class Runtime:
         self.close_renderer()
 
     def close_renderer(self) -> None:
-        """Release the RTX session and the raster renderer, if open."""
+        """Release the RTX session and raster renderers, if open."""
         rtx, raster = self._rtx, self._renderer
+        boxes = self._box_renderer
         self._rtx = None
         self._renderer = None
         self._image_size = None
+        self._box_renderer = None
+        self._box_image_size = None
         try:
             if rtx is not None:
                 rtx.close()
         finally:
-            if raster is not None:
-                raster.close()
+            try:
+                if raster is not None:
+                    raster.close()
+            finally:
+                if boxes is not None:
+                    boxes.close()
 
     def reset(self) -> None:
         """Return to the scene's keyframe, if it has one."""

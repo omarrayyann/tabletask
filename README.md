@@ -61,6 +61,35 @@ observations, rewards, terminated, truncated, infos = envs.step(actions)
 envs.close()
 ```
 
+### Optional bounding-box labels
+
+Request labels for named task objects in selected cameras. For `pick-max`, `item1`
+is the target object:
+
+```python
+env = tabletask.make("pick-max", bounding_boxes={"external": ["item1"]})
+obs, info = env.reset(seed=0)
+target = obs["bounding_boxes"]["external"]["item1"]
+box = target["yxyx"]       # int32 [ymin, xmin, ymax, xmax] in RGB image pixels.
+label = target["label"]    # The target asset's description, as used in the instruction.
+visible = target["visible"]
+env.close()
+```
+
+- Labels are disabled by default. The same option works with `num_envs`, and
+  `envs.set(bounding_boxes={"external": ["item1"]})` changes it for existing workers.
+- Boxes enclose visible object pixels, including child bodies, with exclusive maximum
+  coordinates. Fully occluded or offscreen objects return an all-zero box and `visible=False`.
+- Add `"wrist": ["item1"]` to label the wrist view. Each labeled camera adds one
+  segmentation render. Labels are returned only when that camera's RGB image is rendered.
+  Action chunks generate labels once at the final observation, alongside RGB.
+- Coordinates match the returned image size. Resize, crop, or letterbox them with the
+  image before converting to model-specific tokens. Raster rendering is required.
+- For PaliGemma supervision, retain the yxyx order, quantize the transformed coordinates
+  into its 1,024 location bins, and construct the answer as four location tokens followed
+  by a space and the label. The prompt is `"detect " + label + "\n"`. Cache the prompt
+  and label tokens per description. Keep invisible targets separate from valid boxes.
+
 
 ### Acknowledgments
 
